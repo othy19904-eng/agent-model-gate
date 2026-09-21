@@ -69,6 +69,27 @@ Audit multiple task categories/model pairs:
 agent-model-gate audit my-replays.jsonl
 ```
 
+## Capture one replay
+
+The `replay` command runs a candidate command inside a **temporary copy** of the repository, then runs an executable verifier and appends the evidence as JSONL:
+
+```bash
+agent-model-gate replay \
+  --repo . \
+  --task-id test-001 \
+  --category test-generation \
+  --baseline-model frontier-model \
+  --candidate-model mid-tier-model \
+  --baseline-cost-usd 2.84 \
+  --candidate-cost-usd 0.91 \
+  --candidate-command 'your-agent-command --prompt task.txt' \
+  --verify-command 'python -m pytest -q' \
+  --escalation-cost-usd 2.84 \
+  --output replays.jsonl
+```
+
+The temporary copy protects the original working tree from candidate edits. It is **not a security sandbox**: the candidate process still has the permissions and network access of the user running it. Only run commands you trust.
+
 ## JSONL schema
 
 Required fields:
