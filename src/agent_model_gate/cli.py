@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 from .core import GateConfig, evaluate
 from .io import group_by_category, load_jsonl
+from .replay import append_jsonl, replay_once
 
 
 def _report_dict(report):
@@ -57,12 +58,46 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--min-savings-pct", type=float, default=0.20)
     audit.add_argument("--json", action="store_true", dest="as_json")
 
+    replay = sub.add_parser("replay", help="Run one candidate command in a temporary repo copy, verify it, and append JSONL evidence")
+    replay.add_argument("--repo", default=".")
+    replay.add_argument("--task-id", required=True)
+    replay.add_argument("--category", required=True)
+    replay.add_argument("--baseline-model", required=True)
+    replay.add_argument("--candidate-model", required=True)
+    replay.add_argument("--baseline-cost-usd", type=float, required=True)
+    replay.add_argument("--candidate-cost-usd", type=float, required=True)
+    replay.add_argument("--candidate-command", required=True)
+    replay.add_argument("--verify-command", required=True)
+    replay.add_argument("--escalation-cost-usd", type=float, default=0.0)
+    replay.add_argument("--rework-cost-usd", type=float, default=0.0)
+    replay.add_argument("--timeout-seconds", type=int, default=900)
+    replay.add_argument("--output", default="agent-model-gate-results.jsonl")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "replay":
+        row = replay_once(
+            repo=args.repo,
+            task_id=args.task_id,
+            category=args.category,
+            baseline_model=args.baseline_model,
+            candidate_model=args.candidate_model,
+            baseline_cost_usd=args.baseline_cost_usd,
+            candidate_cost_usd=args.candidate_cost_usd,
+            candidate_command=args.candidate_command,
+            verify_command=args.verify_command,
+            escalation_cost_usd=args.escalation_cost_usd,
+            rework_cost_usd=args.rework_cost_usd,
+            timeout_seconds=args.timeout_seconds,
+        )
+        append_jsonl(args.output, row)
+        print(json.dumps(row, indent=2, sort_keys=True))
+        return 0 if row["candidate_verified"] else 2
+
     config = GateConfig(
         min_samples=args.min_samples,
         min_success_rate=args.min_success_rate,
