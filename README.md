@@ -20,75 +20,82 @@ Token-price comparisons can be misleading. A cheaper model that fails more often
 
 Agent Model Gate evaluates replay evidence and includes failure/escalation cost before recommending a downgrade.
 
-## v0.1 scope
-
-This first version is intentionally offline and local:
-
-1. Run or collect candidate-model replays outside production.
-2. Verify outcomes with deterministic checks such as tests/build/lint/typecheck.
-3. Export one JSONL row per replay.
-4. Let Agent Model Gate calculate the quality confidence interval and adjusted economics.
-
-No proxy. No SaaS. No source-code upload.
-
 ## Install
 
 ```bash
 python -m pip install -e .
 ```
 
-## Try it
+## Try the decision engine
 
 ```bash
 agent-model-gate verify examples/sample_results.jsonl
 ```
 
-Example output from the included sample:
+The included sample deliberately returns `UNKNOWN`: 49/50 replays pass and adjusted savings are large, but the 95% confidence lower bound is still below the default 95% quality floor.
 
-```text
-UNKNOWN
-category: test-generation
-models: frontier-model -> mid-tier-model
-samples: 50
-verified success: 49/50 (98.0%, 95% CI 89.5%-99.6%)
-baseline avg cost: $2.8400/task
-candidate adjusted avg cost: $0.9698/task
-adjusted savings: 65.9%
-reason: evidence is promising, but the confidence lower bound does not yet clear the 95% quality floor.
-```
+## Run a real coding-agent replay
 
-Machine-readable output:
+`replay-agent` supports Codex and Claude Code. It copies the target repository to a temporary directory, lets the coding agent edit that copy, then runs a deterministic verifier.
+
+### Codex
+
+Codex exposes token usage in `codex exec --json`. Pass current token prices explicitly so Agent Model Gate does not hard-code pricing that can go stale.
 
 ```bash
-agent-model-gate verify examples/sample_results.jsonl --json
-```
-
-Audit multiple task categories/model pairs:
-
-```bash
-agent-model-gate audit my-replays.jsonl
-```
-
-## Capture one replay
-
-The `replay` command runs a candidate command inside a **temporary copy** of the repository, then runs an executable verifier and appends the evidence as JSONL:
-
-```bash
-agent-model-gate replay \
-  --repo . \
-  --task-id test-001 \
-  --category test-generation \
-  --baseline-model frontier-model \
-  --candidate-model mid-tier-model \
-  --baseline-cost-usd 2.84 \
-  --candidate-cost-usd 0.91 \
-  --candidate-command 'your-agent-command --prompt task.txt' \
-  --verify-command 'python -m pytest -q' \
-  --escalation-cost-usd 2.84 \
+agent-model-gate replay-agent \
+  --agent codex \
+  --repo examples/real_replay_fixture \
+  --task-id fixture-001 \
+  --category bug-fix \
+  --baseline-model '<frontier-model>' \
+  --candidate-model '<candidate-model>' \
+  --baseline-cost-usd 1.00 \
+  --prompt-file examples/real_replay_fixture/task.txt \
+  --verify-command 'python -m unittest -q' \
+  --input-price-per-million '<current-input-price>' \
+  --cached-input-price-per-million '<current-cached-input-price>' \
+  --output-price-per-million '<current-output-price>' \
+  --escalation-cost-usd 1.00 \
   --output replays.jsonl
 ```
 
-The temporary copy protects the original working tree from candidate edits. It is **not a security sandbox**: the candidate process still has the permissions and network access of the user running it. Only run commands you trust.
+### Claude Code
+
+Claude Code's JSON output can include `total_cost_usd`, so an explicit candidate price is usually unnecessary:
+
+```bash
+agent-model-gate replay-agent \
+  --agent claude \
+  --repo examples/real_replay_fixture \
+  --task-id fixture-001 \
+  --category bug-fix \
+  --baseline-model '<frontier-model>' \
+  --candidate-model '<candidate-model>' \
+  --baseline-cost-usd 1.00 \
+  --prompt-file examples/real_replay_fixture/task.txt \
+  --verify-command 'python -m unittest -q' \
+  --escalation-cost-usd 1.00 \
+  --output replays.jsonl
+```
+
+For the Claude adapter, Bash is explicitly disallowed during the agent step; tests run separately as the verifier. Codex is invoked with its `workspace-write` sandbox.
+
+The temporary-copy mechanism protects the original working tree from edits, but it is not a substitute for OS/container isolation. Run coding agents only in environments you trust.
+
+## Audit accumulated evidence
+
+After collecting enough replays:
+
+```bash
+agent-model-gate verify replays.jsonl
+```
+
+or, for several categories/model pairs:
+
+```bash
+agent-model-gate audit replays.jsonl
+```
 
 ## JSONL schema
 
@@ -106,16 +113,7 @@ Required fields:
 }
 ```
 
-Optional failure-cost fields:
-
-```json
-{
-  "escalation_cost_usd": 2.84,
-  "rework_cost_usd": 0.15
-}
-```
-
-When `candidate_verified` is false, the adjusted candidate cost includes candidate cost + escalation cost + rework cost.
+When `candidate_verified` is false, adjusted economics include candidate cost plus escalation/rework costs.
 
 ## Decision model
 
@@ -126,24 +124,11 @@ Defaults:
 - minimum adjusted savings: `20%`
 - confidence: Wilson 95% interval
 
-A downgrade is considered safe only when the **lower bound** of the success confidence interval clears the configured quality floor and adjusted savings clear the configured savings floor.
-
-Otherwise the tool returns `KEEP_FRONTIER` when evidence clearly rejects the candidate, or `UNKNOWN` when the evidence is insufficient.
-
-Thresholds are configurable:
-
-```bash
-agent-model-gate verify results.jsonl \
-  --min-samples 50 \
-  --min-success-rate 0.98 \
-  --min-savings-pct 0.25
-```
+A downgrade is considered safe only when the **lower bound** of the success confidence interval clears the quality floor and adjusted savings clear the savings floor.
 
 ## What this is not
 
-Agent Model Gate is not a replacement for Cursor Router, Portkey, LiteLLM, Not Diamond, or another request router. A future version may export routing policies **after** replay evidence proves them.
-
-The design principle is:
+Agent Model Gate is not a replacement for a request router. A future version may export routing policies **after** replay evidence proves them.
 
 ```text
 expensive task
@@ -159,19 +144,12 @@ SAFE_TO_DOWNGRADE / KEEP_FRONTIER / UNKNOWN
 
 ## Roadmap
 
-The next experiments are evidence-driven:
-
-- adapters for Claude Code / Codex trace formats
-- sandbox replay runner
-- verifier adapters (`pytest`, `npm test`, build, lint, typecheck)
-- cost extraction from provider usage metadata
+- paired baseline/candidate agent replay
+- adapters for historical Claude Code / Codex traces
+- stronger verifier adapters (pytest, npm test, build, lint, typecheck)
 - task clustering/category inference
 - GitHub Action report
 - routing-policy export only after offline evidence exists
-
-## Security posture
-
-The core is local-first. Repositories, traces, and source code should not need to leave the developer's machine for the decision engine to work.
 
 ## Status
 
