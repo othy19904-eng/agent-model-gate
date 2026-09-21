@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 from dataclasses import asdict
+from pathlib import Path
 
+from .agents import AgentUnavailableError, replay_agent_once
 from .core import GateConfig, evaluate
 from .io import group_by_category, load_jsonl
 from .replay import append_jsonl, replay_once
@@ -35,6 +38,12 @@ def _print_human(report) -> None:
     print(f"candidate adjusted avg cost: ${report.candidate_adjusted_avg_cost_usd:.4f}/task")
     print(f"adjusted savings: {report.savings_pct:.1%}")
     print(f"reason: {report.reason}")
+
+
+def _prompt_text(args) -> str:
+    if args.prompt is not None:
+        return args.prompt
+    return Path(args.prompt_file).read_text(encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,12 +82,34 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--timeout-seconds", type=int, default=900)
     replay.add_argument("--output", default="agent-model-gate-results.jsonl")
 
+    agent = sub.add_parser("replay-agent", help="Run Codex or Claude Code against a temporary repo copy and capture verified evidence")
+    agent.add_argument("--agent", choices=["codex", "claude"], required=True)
+    agent.add_argument("--repo", default=".")
+    agent.add_argument("--task-id", required=True)
+    agent.add_argument("--category", required=True)
+    agent.add_argument("--baseline-model", required=True)
+    agent.add_argument("--candidate-model", required=True)
+    agent.add_argument("--baseline-cost-usd", type=float, required=True)
+    prompt_group = agent.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument("--prompt")
+    prompt_group.add_argument("--prompt-file")
+    agent.add_argument("--verify-command", required=True)
+    agent.add_argument("--candidate-cost-usd", type=float)
+    agent.add_argument("--input-price-per-million", type=float)
+    agent.add_argument("--cached-input-price-per-million", type=float)
+    agent.add_argument("--output-price-per-million", type=float)
+    agent.add_argument("--escalation-cost-usd", type=float, default=0.0)
+    agent.add_argument("--rework-cost-usd", type=float, default=0.0)
+    agent.add_argument("--timeout-seconds", type=int, default=900)
+    agent.add_argument("--output", default="agent-model-gate-results.jsonl")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
     if args.command == "replay":
         row = replay_once(
             repo=args.repo,
@@ -94,6 +125,41 @@ def main(argv: list[str] | None = None) -> int:
             rework_cost_usd=args.rework_cost_usd,
             timeout_seconds=args.timeout_seconds,
         )
+        append_jsonl(args.output, row)
+        print(json.dumps(row, indent=2, sort_keys=True))
+        return 0 if row["candidate_verified"] else 2
+
+    if args.command == "replay-agent":
+        if (
+            args.agent == "codex"
+            and args.candidate_cost_usd is None
+            and (args.input_price_per_million is None or args.output_price_per_million is None)
+        ):
+            parser.error(
+                "Codex JSONL exposes token usage, not a dollar total. Supply --candidate-cost-usd "
+                "or both --input-price-per-million and --output-price-per-million."
+            )
+        try:
+            row = replay_agent_once(
+                provider=args.agent,
+                repo=args.repo,
+                task_id=args.task_id,
+                category=args.category,
+                baseline_model=args.baseline_model,
+                candidate_model=args.candidate_model,
+                baseline_cost_usd=args.baseline_cost_usd,
+                prompt=_prompt_text(args),
+                verify_command=shlex.split(args.verify_command),
+                candidate_cost_usd=args.candidate_cost_usd,
+                input_price_per_million=args.input_price_per_million,
+                cached_input_price_per_million=args.cached_input_price_per_million,
+                output_price_per_million=args.output_price_per_million,
+                escalation_cost_usd=args.escalation_cost_usd,
+                rework_cost_usd=args.rework_cost_usd,
+                timeout_seconds=args.timeout_seconds,
+            )
+        except AgentUnavailableError as exc:
+            parser.error(str(exc))
         append_jsonl(args.output, row)
         print(json.dumps(row, indent=2, sort_keys=True))
         return 0 if row["candidate_verified"] else 2

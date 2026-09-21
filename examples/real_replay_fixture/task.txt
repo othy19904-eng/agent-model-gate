@@ -1,0 +1,3 @@
+Fix the bug in calc.py so that the add() function behaves correctly for the existing tests.
+Make the smallest correct code change.
+Do not modify the tests.
